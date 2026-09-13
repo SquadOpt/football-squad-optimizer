@@ -59,6 +59,7 @@ from squadopt.data.sources.fpl_live import BOOTSTRAP_PAYLOAD
 from squadopt.evaluation.models import EvaluationValidationError
 from squadopt.evaluation.scoring import complete_optimization_decision
 from squadopt.live.errors import LedgerError as LedgerError
+from squadopt.live.free_hit import FREE_HIT_CHIP, free_hit_basis_gameweek
 from squadopt.live.recommendation import Projection
 from squadopt.live.report import Recommendation
 from squadopt.live.transfers import FREE_TRANSFERS_AFTER_OPENING, HeldSquad
@@ -678,20 +679,36 @@ def held_squad_from_ledger(
     entry = matched[0]
     decision = entry.decision
     block = decision.get("transfers")
-    free_hit_played = isinstance(block, Mapping) and block.get("chip") == "freehit"
+    free_hit_played = isinstance(block, Mapping) and block.get("chip") == FREE_HIT_CHIP
     if free_hit_played:
         # A free hit's squad was temporary: the squad, bank, and purchase prices held
-        # are the ones the free-hit week started from — the entry before it — while
-        # the free transfers carried are the free-hit week's own.
+        # are the ones the free-hit week started from — the entry before it, and the one
+        # before that if it was a free-hit week too — while the free transfers carried
+        # are the free-hit week's own. The walk back is ``live.free_hit``'s, the same one
+        # the member path uses, so the two cannot answer differently.
         assert isinstance(block, Mapping)
         free = int(str(block["free_transfers_after"]))
-        earlier_entries = [candidate for candidate in entries if candidate.gameweek == previous - 1]
-        if not earlier_entries:
+        by_gameweek: dict[int, LedgerEntry] = {}
+        for candidate in entries:
+            by_gameweek.setdefault(candidate.gameweek, candidate)
+
+        def was_free_hit(week: int) -> bool:
+            recorded = by_gameweek.get(week)
+            if recorded is None:
+                raise LedgerError(
+                    f"GW{previous} was a free-hit week; the squad it started from is GW"
+                    f"{week}'s, which the ledger does not hold."
+                )
+            earlier_block = recorded.decision.get("transfers")
+            return isinstance(earlier_block, Mapping) and earlier_block.get("chip") == FREE_HIT_CHIP
+
+        basis = free_hit_basis_gameweek(previous, was_free_hit=was_free_hit)
+        if basis is None:
             raise LedgerError(
-                f"GW{previous} was a free-hit week; the squad it started from is GW"
-                f"{previous - 1}'s, which the ledger does not hold."
+                f"GW{previous} was a free-hit week with no earlier gameweek to fall back "
+                "on; the squad it started from cannot be resolved."
             )
-        entry = earlier_entries[0]
+        entry = by_gameweek[basis]
         decision = entry.decision
         block = decision.get("transfers")
     squad_ids = decision["squad_player_ids"]

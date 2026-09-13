@@ -27,6 +27,7 @@ import pandas as pd
 
 from squadopt.application.views import _View
 from squadopt.evaluation import FrozenSquadDecision
+from squadopt.live.free_hit import FREE_HIT_CHIP, played_free_hit_last_week
 from squadopt.live.rules import CHIP_NAMES, SeasonRules
 from squadopt.live.transfers import HeldSquad
 
@@ -226,9 +227,10 @@ class ChipWindowState:
     """One published window of one chip, as the member stands before ``gameweek``.
 
     ``state`` is ``used`` (with ``gameweek`` the week it was played), ``expired`` (the
-    window closed unplayed), ``not_yet`` (the window has not opened), ``available``, or
-    ``unknown`` when the member's chip history was not captured at all: no history is
-    not the same thing as no chips played.
+    window closed unplayed), ``not_yet`` (it cannot be played this week but can later:
+    the window has not opened, or a Free Hit played last week bars this week's),
+    ``available``, or ``unknown`` when the member's chip history was not captured at
+    all: no history is not the same thing as no chips played.
     """
 
     state: str
@@ -257,6 +259,12 @@ def chip_states(
     history the rules cannot place and is refused. A chip the season lists once carries
     ``None`` for its second half; more windows than halves is a rule set this shape
     cannot state.
+
+    One rule the published windows do not state is applied on top of them: "The Free Hit
+    chip cannot be played in consecutive Gameweeks." A member who played the first half's
+    Free Hit in gameweek 19 cannot play the second half's in gameweek 20, so that window
+    reads ``not_yet`` in gameweek 20 and ``available`` from gameweek 21. Calling it
+    available would be advice the game refuses.
     """
 
     played = (
@@ -282,6 +290,11 @@ def chip_states(
             elif gameweek > window.stop_event:
                 state, when = "expired", None
             elif gameweek < window.start_event:
+                state, when = "not_yet", None
+            elif name == FREE_HIT_CHIP and played_free_hit_last_week(gameweek, weeks or ()):
+                # Open, unspent, and still not playable this week: the chip cannot be
+                # played in consecutive gameweeks. ``weeks`` is the whole season's plays
+                # because the forbidden pair (19 and 20) straddles the two windows.
                 state, when = "not_yet", None
             else:
                 state, when = "available", None

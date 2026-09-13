@@ -14,12 +14,12 @@ from squadopt.application.entries import (
 )
 from squadopt.data.errors import DataError
 from squadopt.data.sources.fpl_live import (
-    FREE_HIT_CHIP,
     EntryPicksRecord,
     entry_transfer_history,
     fpl_entry_picks,
 )
 from squadopt.live.banking import BankedFreeTransfers, banked_free_transfers
+from squadopt.live.free_hit import FIRST_GAMEWEEK, FREE_HIT_CHIP, free_hit_basis_gameweek
 from squadopt.live.rules import free_transfer_cap
 
 
@@ -99,9 +99,10 @@ class CapturePicksProvider:
         fifteen, and bank, are the ones from before the chip, and the chip week costs
         no transfer. So a Free Hit week's basis is the previous week's picks — walked
         back once more if that week was a Free Hit too (two chip sets a season make it
-        possible), never below gameweek 1. A Wildcard is the opposite case: its squad
-        *is* the new base and persists, so it keeps the captured basis, as do Bench
-        Boost and Triple Captain, which change no squad.
+        possible), never below gameweek 1. The walk itself is ``live.free_hit``'s, shared
+        with the ledger path so that one rule keeps one answer. A Wildcard is the opposite
+        case: its squad *is* the new base and persists, so it keeps the captured basis, as
+        do Bench Boost and Triple Captain, which change no squad.
 
         When the earlier document is not in the capture the answer is a stated refusal,
         not the Free Hit squad: advice built on fifteen players the member does not
@@ -110,14 +111,10 @@ class CapturePicksProvider:
 
         if captured.active_chip != FREE_HIT_CHIP:
             return captured, CAPTURED_SQUAD_BASIS
-        entry_id, season, week = captured.entry_id, captured.season, captured.gameweek
-        while True:
-            week -= 1
-            if week < 1:
-                raise EntryError(
-                    f"Entry {entry_id} played a Free Hit in gameweek {week + 1} with no "
-                    "earlier gameweek to fall back on; its squad cannot be resolved."
-                )
+        entry_id, season = captured.entry_id, captured.season
+        read: dict[int, EntryPicksRecord] = {}
+
+        def was_free_hit(week: int) -> bool:
             name = f"entry-{entry_id}-picks-gw{week:02d}.json"
             if name not in self._payloads:
                 raise EntryError(
@@ -125,9 +122,16 @@ class CapturePicksProvider:
                     f"squad for the coming deadline is the one held before it, but the "
                     f"capture holds no {name}. Re-capture with --entries."
                 )
-            earlier = self._record(entry_id, season, week)
-            if earlier.active_chip != FREE_HIT_CHIP:
-                return earlier, pre_free_hit_basis(week)
+            read[week] = self._record(entry_id, season, week)
+            return read[week].active_chip == FREE_HIT_CHIP
+
+        week = free_hit_basis_gameweek(captured.gameweek, was_free_hit=was_free_hit)
+        if week is None:
+            raise EntryError(
+                f"Entry {entry_id} played a Free Hit in gameweek {FIRST_GAMEWEEK} with no "
+                "earlier gameweek to fall back on; its squad cannot be resolved."
+            )
+        return read[week], pre_free_hit_basis(week)
 
     def picks(self, entry_id: int, season: str, gameweek: int) -> EntryPicks:
         record = self._record(entry_id, season, gameweek)
